@@ -1,0 +1,1165 @@
+<!DOCTYPE html>
+<html lang="cs" class="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Hlasování ve třídě – Živé otázky a odpovědi</title>
+    <meta name="description" content="Interaktivní systém pro živé hlasování ve třídě na projektoru s QR kódem a okamžitým připojením žáků z mobilu." />
+    <meta property="og:title" content="Hlasování ve třídě – Živé otázky a odpovědi" />
+    <meta property="og:description" content="Interaktivní systém pro živé hlasování ve třídě na projektoru s QR kódem a okamžitým připojením žáků z mobilu." />
+
+    <!-- Google Fonts: Inter & JetBrains Mono -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@600;700;800&display=swap" rel="stylesheet" />
+
+    <!-- Standalone Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        darkMode: 'class',
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ['Inter', 'sans-serif'],
+              mono: ['JetBrains Mono', 'monospace']
+            }
+          }
+        }
+      }
+    </script>
+
+    <!-- Standalone Client Libraries (Confetti, QR Code generator, Paho MQTT) -->
+    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.3/dist/confetti.browser.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js"></script>
+
+    <style>
+      body {
+        margin: 0;
+        background-color: #020617;
+        color: #f8fafc;
+        font-family: 'Inter', sans-serif;
+        -webkit-font-smoothing: antialiased;
+        overflow-x: hidden;
+      }
+      * {
+        box-sizing: border-box;
+      }
+    </style>
+  </head>
+  <body class="bg-slate-950 text-slate-100 min-h-screen">
+    <!-- Root Mounting Element for React or Standalone Single-File Engine -->
+    <div id="root"></div>
+
+    <!-- Vite module entry point for AI Studio / Vite dev server -->
+    <script type="module" src="/src/main.tsx"></script>
+
+    <!-- Standalone Single-File Engine: Executes when downloaded directly as index.html or presented from GitHub -->
+    <script>
+      (function() {
+        setTimeout(function() {
+          // If React/Vite initialized successfully, let React handle rendering
+          if (window.__VITE_LOADED__) return;
+
+          console.log('[Hlasování] Spouštím samostatný režim index.html (GitHub / Standalone)...');
+
+          // Helper to normalize Google Drive and image links
+          function normalizeImageUrl(url) {
+            if (!url) return '';
+            const trimmed = url.trim();
+            const gdriveMatch = trimmed.match(/drive\.google\.com\/file\/d\/([a-zA-Z0-9_-]+)/);
+            if (gdriveMatch && gdriveMatch[1]) {
+              return 'https://lh3.googleusercontent.com/d/' + gdriveMatch[1];
+            }
+            const gdriveIdMatch = trimmed.match(/drive\.google\.com\/.*[?&]id=([a-zA-Z0-9_-]+)/);
+            if (gdriveIdMatch && gdriveIdMatch[1]) {
+              return 'https://lh3.googleusercontent.com/d/' + gdriveIdMatch[1];
+            }
+            const gdriveShareMatch = trimmed.match(/drive\.google\.com\/open\?id=([a-zA-Z0-9_-]+)/);
+            if (gdriveShareMatch && gdriveShareMatch[1]) {
+              return 'https://lh3.googleusercontent.com/d/' + gdriveShareMatch[1];
+            }
+            return trimmed;
+          }
+
+          // State Setup
+          const queryParams = new URLSearchParams(window.location.search);
+          let currentRole = queryParams.get('role') === 'voter' ? 'voter' : 'projector';
+          const roomCode = (queryParams.get('room') || 'TRIDA').toUpperCase();
+          let copySuccess = false;
+          let showQuestionEditor = false;
+          let showUrlSettings = false;
+
+          const VOTING_DURATION = 60; // 60s open voting, then results automatically reveal
+
+          let voterId = localStorage.getItem('standalone_voter_id');
+          if (!voterId) {
+            voterId = 'v_' + Math.random().toString(36).substring(2, 9);
+            localStorage.setItem('standalone_voter_id', voterId);
+          }
+
+          let voterName = localStorage.getItem('standalone_voter_name') || '';
+          let hasVoterJoined = Boolean(voterName);
+
+          const DEFAULT_QUESTIONS = [
+            {
+              id: 'q1',
+              text: 'Jak by měla nosit kočka kalhoty?',
+              image: 'https://drive.google.com/file/d/1905-DrGN5LplmIAvX-EiOnwpNMuIkt5o/view?usp=sharing',
+              options: ['Na 2 zadních nohách (jako člověk)', 'Na všech 4 nohách (přes celé tělo)']
+            },
+            {
+              id: 'q2',
+              text: 'Je ananas na pizzu kulinářský zločin, nebo skvělá kombinace?',
+              image: 'https://images.unsplash.com/photo-1565299624946-b28f40a0ae38?w=800&auto=format&fit=crop&q=80',
+              options: ['Lahodná kombinace sladkého a slaného', 'Absolutní kulinářský hřích']
+            },
+            {
+              id: 'q3',
+              text: 'Měly by být domácí úkoly na základních a středních školách zcela zrušeny?',
+              image: 'https://images.unsplash.com/photo-1497633762265-9d179a990aa6?w=800&auto=format&fit=crop&q=80',
+              options: ['Ano, veškerá výuka má probíhat ve škole', 'Ne, procvičování doma je nezbytné']
+            },
+            {
+              id: 'q4',
+              text: 'Měl by být v moderní společnosti znovu zaveden trest smrti za nejtěžší zločiny?',
+              image: 'https://images.unsplash.com/photo-1589829545856-d10d557cf95f?w=800&auto=format&fit=crop&q=80',
+              options: ['Ano, pro neoddiskutovatelně prokázané brutální činy', 'Ne, trest smrti do moderního státu nepatří']
+            },
+            {
+              id: 'q5',
+              text: 'Co je podle tebe v životě důležitější?',
+              image: 'https://images.unsplash.com/photo-1507679799987-c73779587ccf?w=800&auto=format&fit=crop&q=80',
+              options: [
+                'Promyslet rozhodnutí, ale někdy se rozhodnout pozdě',
+                'Reagovat rychle, ale občas udělat chybu'
+              ]
+            }
+          ];
+
+          let customBaseUrl = localStorage.getItem('voting_custom_base_url') || '';
+          const isFileProtocol = window.location.protocol === 'file:';
+
+          const savedQuestions = localStorage.getItem('voting_questions_' + roomCode);
+          const savedVotes = localStorage.getItem('voting_votes_' + roomCode);
+
+          let initialQuestions = DEFAULT_QUESTIONS;
+          if (savedQuestions) {
+            try {
+              const parsed = JSON.parse(savedQuestions);
+              if (Array.isArray(parsed) && parsed.length > 0) {
+                initialQuestions = parsed.map(function(q) {
+                  if (q.id === 'q1') {
+                    return Object.assign({}, q, { image: 'https://drive.google.com/file/d/1905-DrGN5LplmIAvX-EiOnwpNMuIkt5o/view?usp=sharing' });
+                  }
+                  return q;
+                });
+              }
+            } catch (e) {
+              initialQuestions = DEFAULT_QUESTIONS;
+            }
+          }
+
+          let session = {
+            roomCode: roomCode,
+            currentQuestionIndex: 0,
+            phase: 'voting',
+            timeLeft: VOTING_DURATION,
+            isVotingOpen: true,
+            showResults: false,
+            isLobby: true,
+            questions: initialQuestions,
+            participants: [],
+            votes: savedVotes ? JSON.parse(savedVotes) : {}
+          };
+
+          // Automated Projector Timer (60s voting countdown -> results)
+          setInterval(() => {
+            if (currentRole !== 'projector' || session.isLobby || session.phase === 'results') return;
+
+            if (session.phase === 'voting') {
+              if (session.timeLeft <= 1) {
+                session.phase = 'results';
+                session.timeLeft = 0;
+                session.isVotingOpen = false;
+                session.showResults = true;
+                if (typeof confetti === 'function') {
+                  confetti({ particleCount: 80, spread: 70, origin: { y: 0.75 } });
+                }
+                broadcastState();
+                render();
+              } else {
+                session.timeLeft--;
+                broadcastState();
+                render();
+              }
+            }
+          }, 1000);
+
+          // Realtime Synchronization: Local BroadcastChannel + Public Multi-Device MQTT WSS
+          const bc = new BroadcastChannel('voting_channel_' + roomCode);
+          bc.onmessage = (e) => {
+            if (!e.data) return;
+            if (e.data.type === 'SYNC_STATE') {
+              session = e.data.session;
+              render();
+            } else if (e.data.type === 'VOTE' && currentRole === 'projector') {
+              const currentQ = session.questions[session.currentQuestionIndex];
+              if (!currentQ) return;
+              if (!session.votes[currentQ.id]) {
+                session.votes[currentQ.id] = {};
+              }
+              session.votes[currentQ.id][e.data.voterId] = e.data.optionIndex;
+              broadcastState();
+              render();
+            } else if (e.data.type === 'JOIN' && currentRole === 'projector') {
+              const exists = session.participants.some(p => p.id === e.data.id);
+              if (!exists) {
+                session.participants.push({ id: e.data.id, name: e.data.name, joinedAt: Date.now() });
+                broadcastState();
+                render();
+              }
+            }
+          };
+
+          // MQTT Over WebSockets for remote phones
+          let mqttClient = null;
+          try {
+            if (typeof Paho !== 'undefined' && Paho.MQTT) {
+              const clientId = 'web_' + Math.random().toString(36).substring(2, 11);
+              mqttClient = new Paho.MQTT.Client('broker.emqx.io', 8084, '/mqtt', clientId);
+              mqttClient.onMessageArrived = (message) => {
+                try {
+                  const data = JSON.parse(message.payloadString);
+                  if (data.type === 'SYNC_STATE' && currentRole === 'voter') {
+                    session = data.session;
+                    render();
+                  } else if (data.type === 'VOTE' && currentRole === 'projector') {
+                    const currentQ = session.questions[session.currentQuestionIndex];
+                    if (currentQ) {
+                      if (!session.votes[currentQ.id]) session.votes[currentQ.id] = {};
+                      session.votes[currentQ.id][data.voterId] = data.optionIndex;
+                      broadcastState();
+                      render();
+                    }
+                  } else if (data.type === 'JOIN' && currentRole === 'projector') {
+                    const exists = session.participants.some(p => p.id === data.id);
+                    if (!exists) {
+                      session.participants.push({ id: data.id, name: data.name, joinedAt: Date.now() });
+                      broadcastState();
+                      render();
+                    }
+                  }
+                } catch (err) {}
+              };
+              mqttClient.connect({
+                useSSL: true,
+                timeout: 5,
+                keepAliveInterval: 30,
+                onSuccess: () => {
+                  mqttClient.subscribe('classroom_poll/' + roomCode + '/#');
+                  if (currentRole === 'projector') broadcastState();
+                },
+                onFailure: () => {}
+              });
+            }
+          } catch (e) {}
+
+          function broadcastState() {
+            localStorage.setItem('voting_questions_' + roomCode, JSON.stringify(session.questions));
+            localStorage.setItem('voting_votes_' + roomCode, JSON.stringify(session.votes));
+            bc.postMessage({ type: 'SYNC_STATE', session: session });
+            if (mqttClient && mqttClient.isConnected()) {
+              try {
+                const msg = new Paho.MQTT.Message(JSON.stringify({ type: 'SYNC_STATE', session: session }));
+                msg.destinationName = 'classroom_poll/' + roomCode + '/state';
+                mqttClient.send(msg);
+              } catch (e) {}
+            }
+          }
+
+          function sendVote(optionIndex) {
+            const currentQ = session.questions[session.currentQuestionIndex];
+            if (!currentQ) return;
+            if (!session.votes[currentQ.id]) {
+              session.votes[currentQ.id] = {};
+            }
+            session.votes[currentQ.id][voterId] = optionIndex;
+            bc.postMessage({ type: 'VOTE', voterId: voterId, optionIndex: optionIndex });
+            if (mqttClient && mqttClient.isConnected()) {
+              try {
+                const msg = new Paho.MQTT.Message(JSON.stringify({ type: 'VOTE', voterId: voterId, optionIndex: optionIndex }));
+                msg.destinationName = 'classroom_poll/' + roomCode + '/vote';
+                mqttClient.send(msg);
+              } catch (e) {}
+            }
+            render();
+          }
+
+          function sendJoin(name) {
+            voterName = name;
+            hasVoterJoined = true;
+            localStorage.setItem('standalone_voter_name', name);
+            bc.postMessage({ type: 'JOIN', id: voterId, name: name });
+            if (mqttClient && mqttClient.isConnected()) {
+              try {
+                const msg = new Paho.MQTT.Message(JSON.stringify({ type: 'JOIN', id: voterId, name: name }));
+                msg.destinationName = 'classroom_poll/' + roomCode + '/join';
+                mqttClient.send(msg);
+              } catch (e) {}
+            }
+          }
+
+          // Global App Actions Handler
+          window.appAction = function(action, param) {
+            if (action === 'SET_ROLE') {
+              currentRole = param;
+              const url = new URL(window.location.href);
+              url.searchParams.set('role', param);
+              window.history.replaceState({}, '', url.toString());
+            } else if (action === 'START_POLL') {
+              session.isLobby = false;
+              session.currentQuestionIndex = 0;
+              session.phase = 'voting';
+              session.timeLeft = VOTING_DURATION;
+              session.isVotingOpen = true;
+              session.showResults = false;
+              broadcastState();
+            } else if (action === 'NEXT_QUESTION') {
+              if (session.currentQuestionIndex < session.questions.length - 1) {
+                session.currentQuestionIndex++;
+                session.phase = 'voting';
+                session.timeLeft = VOTING_DURATION;
+                session.isVotingOpen = true;
+                session.showResults = false;
+                broadcastState();
+              }
+            } else if (action === 'PREV_QUESTION') {
+              if (session.currentQuestionIndex > 0) {
+                session.currentQuestionIndex--;
+                session.phase = 'voting';
+                session.timeLeft = VOTING_DURATION;
+                session.isVotingOpen = true;
+                session.showResults = false;
+                broadcastState();
+              }
+            } else if (action === 'TOGGLE_RESULTS') {
+              session.showResults = !session.showResults;
+              if (session.showResults) {
+                session.phase = 'results';
+                session.timeLeft = 0;
+                session.isVotingOpen = false;
+                if (typeof confetti === 'function') {
+                  confetti({ particleCount: 75, spread: 70, origin: { y: 0.75 } });
+                }
+              } else {
+                session.phase = 'voting';
+                session.timeLeft = VOTING_DURATION;
+                session.isVotingOpen = true;
+              }
+              broadcastState();
+            } else if (action === 'RESTART_TIMER') {
+              session.phase = 'voting';
+              session.timeLeft = VOTING_DURATION;
+              session.isVotingOpen = true;
+              session.showResults = false;
+              broadcastState();
+            } else if (action === 'GO_LOBBY') {
+              session.isLobby = true;
+              broadcastState();
+            } else if (action === 'RESET_ALL') {
+              if (confirm('Opravdu chcete restartovat hlasování a vynulovat odpovědi?')) {
+                session.votes = {};
+                session.isLobby = true;
+                session.currentQuestionIndex = 0;
+                session.phase = 'voting';
+                session.timeLeft = VOTING_DURATION;
+                session.isVotingOpen = true;
+                session.showResults = false;
+                broadcastState();
+              }
+            } else if (action === 'TOGGLE_FULLSCREEN') {
+              if (!document.fullscreenElement) {
+                document.documentElement.requestFullscreen().catch(() => {});
+              } else {
+                document.exitFullscreen().catch(() => {});
+              }
+            } else if (action === 'COPY_LINK') {
+              const url = getVoterUrl();
+              navigator.clipboard.writeText(url).then(() => {
+                copySuccess = true;
+                render();
+                setTimeout(() => { copySuccess = false; render(); }, 2500);
+              }).catch(() => {
+                prompt('Zkopírujte tento odkaz:', url);
+              });
+            } else if (action === 'OPEN_EDITOR') {
+              showQuestionEditor = true;
+            } else if (action === 'CLOSE_EDITOR') {
+              showQuestionEditor = false;
+            } else if (action === 'OPEN_URL_SETTINGS') {
+              showUrlSettings = true;
+            } else if (action === 'CLOSE_URL_SETTINGS') {
+              showUrlSettings = false;
+            } else if (action === 'DELETE_QUESTION') {
+              if (session.questions.length <= 1) {
+                alert('V prezentaci musí zůstat alespoň 1 otázka.');
+                return;
+              }
+              session.questions = session.questions.filter(q => q.id !== param);
+              session.currentQuestionIndex = Math.min(session.currentQuestionIndex, session.questions.length - 1);
+              broadcastState();
+            } else if (action === 'VOTE') {
+              sendVote(param);
+            }
+            render();
+          };
+
+          window.handleJoinForm = function(e) {
+            e.preventDefault();
+            const input = document.getElementById('standalone-name-input');
+            const name = input ? input.value.trim() : '';
+            sendJoin(name || ('Žák ' + Math.floor(Math.random() * 100)));
+            render();
+          };
+
+          window.handleUrlSettingsForm = function(e) {
+            e.preventDefault();
+            const input = document.getElementById('custom-url-input');
+            let val = input ? input.value.trim() : '';
+            if (val && !val.startsWith('http://') && !val.startsWith('https://')) {
+              val = 'https://' + val;
+            }
+            customBaseUrl = val;
+            localStorage.setItem('voting_custom_base_url', val);
+            showUrlSettings = false;
+            render();
+          };
+
+          window.handleAddQuestionForm = function(e) {
+            e.preventDefault();
+            const text = document.getElementById('new-q-text')?.value.trim();
+            const img = document.getElementById('new-q-img')?.value.trim();
+            const opt1 = document.getElementById('new-q-opt1')?.value.trim();
+            const opt2 = document.getElementById('new-q-opt2')?.value.trim();
+            const opt3 = document.getElementById('new-q-opt3')?.value.trim();
+            const opt4 = document.getElementById('new-q-opt4')?.value.trim();
+
+            const opts = [opt1, opt2, opt3, opt4].filter(Boolean);
+            if (!text || opts.length < 2) {
+              alert('Zadejte prosím text otázky a alespoň 2 možnosti odpovědi.');
+              return;
+            }
+
+            const newQ = {
+              id: 'q_' + Math.random().toString(36).substring(2, 9),
+              text: text,
+              image: img ? normalizeImageUrl(img) : undefined,
+              options: opts
+            };
+
+            session.questions.push(newQ);
+            broadcastState();
+
+            if (document.getElementById('new-q-text')) document.getElementById('new-q-text').value = '';
+            if (document.getElementById('new-q-img')) document.getElementById('new-q-img').value = '';
+            if (document.getElementById('new-q-opt1')) document.getElementById('new-q-opt1').value = '';
+            if (document.getElementById('new-q-opt2')) document.getElementById('new-q-opt2').value = '';
+            if (document.getElementById('new-q-opt3')) document.getElementById('new-q-opt3').value = '';
+            if (document.getElementById('new-q-opt4')) document.getElementById('new-q-opt4').value = '';
+            render();
+          };
+
+          function getVoterUrl() {
+            let base = '';
+            if (customBaseUrl && customBaseUrl.trim().length > 0) {
+              base = customBaseUrl.trim().split('?')[0];
+              if (!base.startsWith('http://') && !base.startsWith('https://')) {
+                base = 'https://' + base;
+              }
+            } else if (window.location.protocol.startsWith('http')) {
+              base = window.location.origin + window.location.pathname;
+            } else {
+              base = 'https://jenprostatistiku.github.io/hlasovani/';
+            }
+            if (base.endsWith('/')) base = base.slice(0, -1);
+            return base + '?role=voter&room=' + encodeURIComponent(session.roomCode);
+          }
+
+          const OPTION_COLORS = [
+            { bg: 'bg-rose-500', bar: 'bg-rose-500/20 border-rose-400/50', border: 'border-rose-400' },
+            { bg: 'bg-blue-600', bar: 'bg-blue-500/20 border-blue-400/50', border: 'border-blue-400' },
+            { bg: 'bg-amber-500', bar: 'bg-amber-500/20 border-amber-400/50', border: 'border-amber-400' },
+            { bg: 'bg-emerald-600', bar: 'bg-emerald-500/20 border-emerald-400/50', border: 'border-emerald-400' }
+          ];
+          const OPTION_LETTERS = ['A', 'B', 'C', 'D', 'E', 'F'];
+
+          // UI Render Function
+          function render() {
+            const root = document.getElementById('root');
+            if (!root) return;
+
+            const currentQ = session.questions[session.currentQuestionIndex] || { id: 'q1', text: '', options: [] };
+            const qVotes = session.votes[currentQ.id] || {};
+            const totalVotes = Object.keys(qVotes).length;
+            const participantCount = session.participants.length;
+            const voterUrl = getVoterUrl();
+
+            // -------------------------------------------------------------
+            // VOTER VIEW
+            // -------------------------------------------------------------
+            if (currentRole === 'voter') {
+              // Voter Join Step
+              if (!hasVoterJoined) {
+                root.innerHTML = `
+                  <div class="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-between max-w-md mx-auto p-5 sm:p-6 select-none font-sans">
+                    <header class="text-center pt-8">
+                      <div class="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-slate-900 border border-slate-800 text-xs font-semibold text-indigo-400 mb-3 shadow-inner">
+                        <span class="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+                        Místnost: <strong class="text-white font-mono">${session.roomCode}</strong>
+                      </div>
+                      <h1 class="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+                        Připojení k hlasování
+                      </h1>
+                      <p class="text-xs sm:text-sm text-slate-400 mt-1.5 max-w-xs mx-auto">
+                        Zadej své jméno nebo přezdívku pro vstup do živého hlasování.
+                      </p>
+                    </header>
+
+                    <main class="my-auto py-6">
+                      <form onsubmit="handleJoinForm(event)" class="bg-slate-900/90 border border-slate-800 rounded-3xl p-6 sm:p-7 shadow-2xl space-y-6 backdrop-blur-md">
+                        <div>
+                          <label class="block text-xs font-bold text-slate-300 mb-2 uppercase tracking-wider">
+                            Tvoje jméno / přezdívka
+                          </label>
+                          <input
+                            id="standalone-name-input"
+                            type="text"
+                            value="${voterName}"
+                            placeholder="Např. Tereza, Martin..."
+                            autofocus
+                            maxlength="30"
+                            class="w-full px-4 py-3.5 bg-slate-950/90 border-2 border-slate-700 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/20 rounded-2xl text-white font-bold text-base outline-none transition-all placeholder:text-slate-500"
+                          />
+                        </div>
+
+                        <div class="w-full pt-1">
+                          <button
+                            type="submit"
+                            class="w-full py-4 px-6 bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 hover:from-indigo-500 hover:via-purple-500 hover:to-pink-500 active:scale-[0.98] text-white font-bold text-base rounded-2xl shadow-lg shadow-indigo-600/30 transition-all duration-200 cursor-pointer flex items-center justify-center gap-2"
+                          >
+                            <span>Vstoupit do hlasování</span>
+                            <span>→</span>
+                          </button>
+                        </div>
+                      </form>
+                    </main>
+
+                    <footer class="text-center pb-6 text-xs text-slate-600">
+                      <span>Živé hlasování do třídy</span>
+                    </footer>
+                  </div>
+                `;
+                return;
+              }
+
+              // Voter in Lobby Waiting
+              if (session.isLobby) {
+                root.innerHTML = `
+                  <div class="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-between max-w-md mx-auto p-5 select-none text-center">
+                    <header class="pt-6">
+                      <span class="text-xs px-3.5 py-1 rounded-full bg-slate-900 border border-slate-800 text-indigo-400 font-mono">
+                        PIN: <strong>${session.roomCode}</strong>
+                      </span>
+                      <h2 class="text-xl font-bold text-white mt-3">Ahoj, ${voterName}! 🎉</h2>
+                    </header>
+
+                    <main class="my-auto py-12">
+                      <div class="w-20 h-20 rounded-3xl bg-indigo-600/20 border-2 border-indigo-500/40 flex items-center justify-center mx-auto mb-5 text-indigo-400 text-3xl shadow-xl animate-pulse">
+                        ✨
+                      </div>
+                      <h3 class="text-xl font-extrabold text-white mb-2">Jsi v místnosti</h3>
+                      <p class="text-sm text-slate-400 max-w-xs mx-auto leading-relaxed">
+                        Učitel brzy odstartuje otázku na projektoru.
+                      </p>
+                    </main>
+
+                    <footer class="pb-6 text-xs text-slate-600">
+                      <span>Čekejte na spuštění otázky</span>
+                    </footer>
+                  </div>
+                `;
+                return;
+              }
+
+              // Voter on Active Question
+              const myVoteIndex = qVotes[voterId];
+              const hasVoted = myVoteIndex !== undefined;
+              const isClosed = session.phase === 'results';
+
+              let optionsHtml = '';
+              const totalVotesForQ = Object.keys(qVotes).length;
+              (currentQ.options || []).forEach((opt, idx) => {
+                const count = Object.values(qVotes).filter(v => v === idx).length;
+                const pct = totalVotesForQ > 0 ? Math.round((count / totalVotesForQ) * 100) : 0;
+                const isSelected = myVoteIndex === idx;
+                const isClosed = session.phase !== 'voting';
+                const color = OPTION_COLORS[idx % OPTION_COLORS.length];
+
+                optionsHtml += `
+                  <button
+                    onclick="appAction('VOTE', ${idx})"
+                    ${isClosed ? 'disabled' : ''}
+                    class="w-full p-4 rounded-2xl border text-left font-bold text-base transition-all flex items-center justify-between shadow-md relative overflow-hidden ${
+                      isClosed
+                        ? 'bg-slate-800/80 border-slate-700/60 text-slate-300 cursor-not-allowed'
+                        : isSelected
+                        ? 'bg-slate-800 border-purple-400 text-white ring-2 ring-purple-500/40 cursor-pointer'
+                        : 'bg-slate-800/90 hover:bg-slate-800 border-slate-700/70 text-slate-200 active:bg-slate-700/80 cursor-pointer'
+                    }"
+                  >
+                    ${isClosed ? `
+                      <div style="width: ${pct}%" class="absolute inset-y-0 left-0 ${color.lightBg} border-r ${color.border} opacity-50"></div>
+                    ` : ''}
+
+                    <div class="flex items-center gap-3 min-w-0 pr-3 relative z-10">
+                      <span class="text-sm sm:text-base font-bold text-slate-100 truncate">${opt}</span>
+                      ${isSelected ? '<span class="text-[10px] uppercase font-black px-1.5 py-0.5 bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 rounded">Zvoleno</span>' : ''}
+                    </div>
+
+                    <div class="relative z-10 font-mono text-sm sm:text-base font-bold text-slate-300 flex-shrink-0">
+                      ${pct}% • ${count}
+                    </div>
+                  </button>
+                `;
+              });
+
+              root.innerHTML = `
+                <div class="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-between max-w-md mx-auto p-4 sm:p-5 select-none font-sans">
+                  <header class="flex items-center justify-between pb-3 border-b border-slate-800/80">
+                    <div>
+                      <span class="text-[11px] font-mono text-indigo-400 uppercase tracking-wider block">
+                        Místnost: ${session.roomCode}
+                      </span>
+                      <h2 class="text-sm font-bold text-slate-200">${voterName}</h2>
+                    </div>
+
+                    ${session.phase === 'voting' ? `
+                      <span class="text-xs px-3 py-1.5 rounded-full font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 animate-pulse">
+                        ⚡ Výsledky za: <strong>${session.timeLeft}s</strong>
+                      </span>
+                    ` : `
+                      <span class="text-xs px-3 py-1.5 rounded-full font-bold bg-indigo-500/20 text-indigo-300 border border-indigo-500/40">
+                        📊 Výsledky odhaleny
+                      </span>
+                    `}
+                  </header>
+
+                  <main class="my-auto py-3 w-full">
+                    <!-- Main Centered Card (Dark Mode) -->
+                    <div class="w-full bg-slate-900/95 border border-slate-800 rounded-3xl shadow-2xl overflow-hidden relative backdrop-blur-sm">
+                      <!-- Thin purple-to-teal gradient top border -->
+                      <div class="w-full h-1.5 bg-gradient-to-r from-purple-500 via-indigo-500 to-teal-400"></div>
+
+                      <div class="p-4 sm:p-6 space-y-4">
+                        <!-- Top Row: Purple Oval Badge (1/4) in top-left -->
+                        <div class="flex items-center justify-between">
+                          <span class="px-3 py-1 bg-purple-600/90 text-white rounded-full text-xs font-extrabold font-mono shadow-sm tracking-wide">
+                            ${session.currentQuestionIndex + 1}/${session.questions.length}
+                          </span>
+                          <span class="text-xs font-mono text-slate-400">
+                            ${session.phase === 'voting' ? `Čas: ${session.timeLeft}s` : 'Výsledky'}
+                          </span>
+                        </div>
+
+                        <h3 class="text-base sm:text-lg font-extrabold text-white text-center leading-snug">
+                          ${currentQ.text}
+                        </h3>
+
+                        ${currentQ.image ? `
+                          <div class="w-full h-48 sm:h-56 overflow-hidden rounded-2xl border border-slate-800/80 bg-slate-950 shadow-md">
+                            <img
+                              src="${normalizeImageUrl(currentQ.image)}"
+                              alt="Obrázek"
+                              referrerpolicy="no-referrer"
+                              class="w-full h-full object-cover"
+                              onerror="this.style.display='none'"
+                            />
+                          </div>
+                        ` : ''}
+
+                        ${session.phase === 'voting' ? `
+                          <div class="w-full h-2 bg-slate-800 rounded-full overflow-hidden">
+                            <div class="h-full bg-gradient-to-r from-emerald-400 to-teal-300 transition-all duration-1000 ease-linear rounded-full" style="width: ${Math.round((session.timeLeft / VOTING_DURATION) * 100)}%"></div>
+                          </div>
+                        ` : ''}
+
+                        <!-- Stacked Dark Gray Horizontal Option Panels -->
+                        <div class="space-y-3 pt-1">
+                          ${optionsHtml}
+                        </div>
+                      </div>
+                    </div>
+                  </main>
+
+                  <footer class="pt-2 text-center text-xs space-y-2">
+                    ${session.phase === 'voting' ? (
+                      hasVoted ? `
+                        <div class="bg-emerald-950/40 border border-emerald-800/40 rounded-xl p-2 text-emerald-300 font-medium">
+                          ✓ Váš hlas byl zaznamenán. Výsledky se zobrazí za ${session.timeLeft}s.
+                        </div>
+                      ` : `
+                        <div class="bg-indigo-950/50 border border-indigo-800/50 rounded-xl p-2 text-indigo-200 font-bold animate-bounce">
+                          ⚡ Klepněte na možnost pro odeslání hlasu! (${session.timeLeft}s)
+                        </div>
+                      `
+                    ) : `
+                      <div class="bg-slate-900 border border-slate-800 rounded-xl p-2 text-slate-300 font-medium">
+                        📊 Hlasování skončilo. Sledujte výsledky na projektoru!
+                      </div>
+                    `}
+                  </footer>
+                </div>
+              `;
+              return;
+            }
+
+            // -------------------------------------------------------------
+            // PROJECTOR LOBBY VIEW
+            // -------------------------------------------------------------
+            if (session.isLobby) {
+              root.innerHTML = `
+                <div class="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-between select-none font-sans overflow-x-hidden">
+                  <!-- Header -->
+                  <header class="p-4 sm:p-6 flex items-center justify-between border-b border-slate-800/80 max-w-6xl w-full mx-auto">
+                    <div class="flex items-center gap-3">
+                      <div class="px-3.5 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-sm font-bold font-mono text-indigo-400 flex items-center gap-2">
+                        <span class="text-slate-400">PIN:</span>
+                        <span class="text-white text-base font-extrabold">${session.roomCode}</span>
+                      </div>
+
+                      <div class="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-xs font-semibold text-slate-300">
+                        <span class="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+                        Připojeno: <strong class="text-emerald-400 font-mono text-sm">${participantCount}</strong>
+                      </div>
+                    </div>
+
+                    <div class="flex items-center gap-2">
+                      <button onclick="appAction('COPY_LINK')" class="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer">
+                        <span>${copySuccess ? '✓ Zkopírováno!' : '📋 Kopírovat odkaz'}</span>
+                      </button>
+                      <button onclick="appAction('OPEN_URL_SETTINGS')" class="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer" title="Nastavit URL / GitHub Pages">
+                        🌐 URL / GitHub
+                      </button>
+                      <button onclick="appAction('SET_ROLE', 'voter')" class="px-3 py-1.5 bg-indigo-950/80 hover:bg-indigo-900 border border-indigo-700/50 text-indigo-300 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer">
+                        📱 Hlasovat
+                      </button>
+                      <button onclick="appAction('OPEN_EDITOR')" class="p-2 bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-white rounded-xl text-xs transition cursor-pointer" title="Správa otázek">
+                        ⚙️
+                      </button>
+                      <button onclick="appAction('TOGGLE_FULLSCREEN')" class="p-2 bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-white rounded-xl text-xs transition cursor-pointer" title="Celá obrazovka">
+                        ⛶
+                      </button>
+                    </div>
+                  </header>
+
+                  ${isFileProtocol && !customBaseUrl ? `
+                    <div class="max-w-2xl mx-auto w-full px-4 pt-4">
+                      <div class="bg-amber-950/60 border border-amber-500/40 rounded-2xl p-3 sm:p-4 text-amber-200 text-xs sm:text-sm flex items-start gap-3 shadow-lg">
+                        <span class="text-lg">⚠️</span>
+                        <div class="flex-1">
+                          <p class="font-bold text-white mb-1">Otevřeno z lokálního disku (file://)</p>
+                          <p class="text-amber-200/90 leading-relaxed mb-2">
+                            Pro správné skenování fotoaparátem z mobilů žáků nastavte vaši veřejnou adresu z GitHub Pages (např. <code class="bg-amber-900/60 px-1.5 py-0.5 rounded font-mono text-amber-300">https://uzivatel.github.io/repo/</code>).
+                          </p>
+                          <button onclick="appAction('OPEN_URL_SETTINGS')" class="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white font-bold rounded-lg text-xs transition cursor-pointer">
+                            Nastavit GitHub Pages URL
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ` : ''}
+
+                  <!-- Center Hero QR -->
+                  <main class="flex-1 flex flex-col justify-center items-center max-w-2xl w-full mx-auto p-6 sm:p-10">
+                    <div class="flex flex-col items-center text-center space-y-8 w-full max-w-sm">
+                      <div class="relative group">
+                        <div class="absolute -inset-3 bg-gradient-to-r from-indigo-500/30 via-purple-500/30 to-pink-500/30 rounded-[44px] blur-2xl opacity-70"></div>
+                        <div class="relative p-6 sm:p-8 bg-white rounded-3xl sm:rounded-[36px] shadow-[0_20px_60px_rgba(0,0,0,0.6)] border-4 border-indigo-500/20 flex flex-col items-center justify-center">
+                          <div id="standalone-qr-container" class="w-56 h-56 sm:w-64 sm:h-64 flex items-center justify-center"></div>
+                          <div class="mt-3 text-slate-900 font-extrabold text-sm sm:text-base font-mono tracking-wider flex items-center gap-1.5">
+                            <span>📱 Naskenuj a hlasuj</span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div class="w-full flex items-center justify-center">
+                        <button onclick="appAction('OPEN_URL_SETTINGS')" class="inline-flex items-center gap-2 px-3.5 py-1.5 rounded-full bg-slate-900/90 border border-slate-800 hover:border-slate-700 text-xs text-slate-300 hover:text-white transition cursor-pointer max-w-full">
+                          <span>🌐</span>
+                          <span class="font-mono truncate max-w-[260px] text-slate-400">${voterUrl}</span>
+                          <span class="text-xs text-slate-500">✏️</span>
+                        </button>
+                      </div>
+
+                      <div class="w-full space-y-3">
+                        <button
+                          onclick="appAction('START_POLL')"
+                          class="w-full py-4 sm:py-5 px-8 bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 hover:from-indigo-500 hover:via-purple-500 hover:to-pink-500 text-white font-extrabold text-lg sm:text-xl rounded-2xl shadow-xl shadow-indigo-600/30 transition-all duration-200 cursor-pointer flex items-center justify-center"
+                        >
+                          <span>Spustit hlasování</span>
+                        </button>
+                      </div>
+                    </div>
+                  </main>
+
+                  <!-- Footer -->
+                  <footer class="p-4 border-t border-slate-900 max-w-5xl w-full mx-auto">
+                    <div class="flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-slate-500">
+                      <div class="flex items-center gap-2">
+                        <span>👥 ${participantCount === 0 ? 'Čekáme na první žáky...' : `Připojení žáci: ${session.participants.map(p => p.name).join(', ')}`}</span>
+                      </div>
+                      <div>
+                        <span class="font-mono text-slate-400">PIN: ${session.roomCode}</span>
+                      </div>
+                    </div>
+                  </footer>
+
+                  ${renderEditorModalHtml()}
+                  ${renderUrlSettingsModalHtml()}
+                </div>
+              `;
+
+              // Generate QR Code dynamically
+              setTimeout(() => {
+                const qrBox = document.getElementById('standalone-qr-container');
+                if (qrBox && typeof QRCode !== 'undefined') {
+                  qrBox.innerHTML = '';
+                  new QRCode(qrBox, {
+                    text: voterUrl,
+                    width: 240,
+                    height: 240,
+                    colorDark: '#0f172a',
+                    colorLight: '#ffffff',
+                    correctLevel: QRCode.CorrectLevel.H
+                  });
+                }
+              }, 30);
+              return;
+            }
+
+            // -------------------------------------------------------------
+            // PROJECTOR ACTIVE QUESTION VIEW
+            // -------------------------------------------------------------
+            const counts = (currentQ.options || []).map((_, idx) => {
+              return Object.values(qVotes).filter(v => v === idx).length;
+            });
+            const maxVotes = Math.max(...counts, 0);
+
+            let optionsHtml = '';
+            (currentQ.options || []).forEach((opt, idx) => {
+              const count = counts[idx] || 0;
+              const pct = totalVotes > 0 ? Math.round((count / totalVotes) * 100) : 0;
+              const color = OPTION_COLORS[idx % OPTION_COLORS.length];
+              const isWinner = session.showResults && count === maxVotes && maxVotes > 0;
+
+              optionsHtml += `
+                <div class="w-full bg-slate-800/90 hover:bg-slate-800 border rounded-2xl p-4 sm:p-5 relative overflow-hidden transition-all duration-300 shadow-md flex items-center justify-between gap-4 ${isWinner ? 'border-amber-400/80 ring-2 ring-amber-400/30' : 'border-slate-700/70'}">
+                  ${session.showResults ? `
+                    <div class="absolute inset-y-0 left-0 ${color.bar} border-r-2 ${color.border} opacity-40 transition-all duration-700" style="width: ${pct}%"></div>
+                  ` : ''}
+
+                  <div class="relative z-10 flex items-center gap-3.5 flex-1 min-w-0">
+                    <span class="text-base sm:text-lg font-bold text-slate-100 truncate">${opt}</span>
+                  </div>
+
+                  <div class="relative z-10 font-mono text-base sm:text-xl font-black text-slate-200 flex-shrink-0">
+                    <span>${pct}% • ${count}</span>
+                  </div>
+                </div>
+              `;
+            });
+
+            root.innerHTML = `
+              <div class="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-between select-none font-sans overflow-x-hidden">
+                <!-- Header -->
+                <header class="p-4 sm:p-6 flex items-center justify-between border-b border-slate-800/80 max-w-6xl w-full mx-auto">
+                  <div class="flex items-center gap-3">
+                    <span class="px-3.5 py-1 rounded-xl bg-indigo-600/20 border border-indigo-500/40 text-indigo-400 text-xs font-black uppercase tracking-wider">
+                      Otázka ${session.currentQuestionIndex + 1} z ${session.questions.length}
+                    </span>
+
+                    <div class="flex items-center gap-2 text-xs font-semibold text-slate-300">
+                      <span>Hlasovalo: <strong class="text-indigo-400 font-mono text-sm">${totalVotes}</strong></span>
+                      <span class="text-slate-600">/</span>
+                      <span>Online: <strong class="text-emerald-400 font-mono text-sm">${participantCount}</strong></span>
+                    </div>
+                  </div>
+
+                  <div class="flex items-center gap-3">
+                    ${session.phase === 'voting' ? `
+                      <div class="flex items-center gap-2 px-4 py-1.5 rounded-full bg-emerald-500/25 border-2 border-emerald-400 text-emerald-300 text-sm font-extrabold animate-pulse">
+                        ⚡ HLASUJTE! (Výsledky za ${session.timeLeft}s)
+                      </div>
+                    ` : `
+                      <div class="flex items-center gap-2 px-4 py-1.5 rounded-full bg-indigo-600/30 border-2 border-indigo-400 text-indigo-300 text-sm font-extrabold">
+                        📊 VÝSLEDKY ODHALENY
+                      </div>
+                    `}
+                  </div>
+
+                  <div class="flex items-center gap-2">
+                    <button onclick="appAction('GO_LOBBY')" class="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer">
+                      <span>📱 Úvodní QR</span>
+                    </button>
+                    <button onclick="appAction('SET_ROLE', 'voter')" class="px-3 py-1.5 bg-indigo-950/80 hover:bg-indigo-900 border border-indigo-700/50 text-indigo-300 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer">
+                      <span>📱 Hlasovat</span>
+                    </button>
+                    <button onclick="appAction('TOGGLE_FULLSCREEN')" class="p-2 bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400 hover:text-white rounded-xl text-xs transition cursor-pointer" title="Celá obrazovka">
+                      ⛶
+                    </button>
+                  </div>
+                </header>
+
+                <!-- Question & Options Centerpiece -->
+                <main class="flex-1 max-w-4xl w-full mx-auto p-4 sm:p-6 flex flex-col justify-center items-center">
+                  <!-- Main Centered Card (Dark Mode) -->
+                  <div class="w-full bg-slate-900/95 border border-slate-800 rounded-3xl shadow-2xl overflow-hidden relative backdrop-blur-md">
+                    <!-- Thin purple-to-teal gradient top border -->
+                    <div class="w-full h-1.5 bg-gradient-to-r from-purple-500 via-indigo-500 to-teal-400"></div>
+
+                    <div class="p-6 sm:p-8 space-y-6">
+                      <!-- Top Bar inside Card: Purple Oval Badge (1/4) in top-left -->
+                      <div class="flex items-center justify-between">
+                        <span class="px-3.5 py-1 bg-purple-600/90 text-white rounded-full text-xs sm:text-sm font-extrabold font-mono shadow-sm tracking-wide">
+                          ${session.currentQuestionIndex + 1}/${session.questions.length}
+                        </span>
+
+                        ${session.phase === 'voting' ? `
+                          <div class="flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-300 text-xs sm:text-sm font-bold animate-pulse">
+                            ⚡ Hlasování: <strong class="font-mono">${session.timeLeft}s</strong>
+                          </div>
+                        ` : `
+                          <div class="flex items-center gap-1.5 px-3 py-1 rounded-full bg-indigo-500/20 border border-indigo-500/40 text-indigo-300 text-xs sm:text-sm font-bold">
+                            📊 Výsledky odhaleny
+                          </div>
+                        `}
+                      </div>
+
+                      <!-- Question Heading -->
+                      <div class="text-center">
+                        <h1 class="text-2xl sm:text-3xl lg:text-4xl font-extrabold text-white tracking-tight leading-tight">
+                          ${currentQ.text}
+                        </h1>
+
+                        ${currentQ.image ? `
+                          <div class="w-full my-4 sm:my-5">
+                            <div class="w-full h-64 sm:h-72 md:h-84 max-h-[45vh] overflow-hidden rounded-2xl border border-slate-800/80 bg-slate-950 shadow-lg">
+                              <img
+                                src="${normalizeImageUrl(currentQ.image)}"
+                                alt="Obrázek k otázce"
+                                referrerpolicy="no-referrer"
+                                class="w-full h-full object-cover"
+                                onerror="this.style.display='none'"
+                              />
+                            </div>
+                          </div>
+                        ` : ''}
+                      </div>
+
+                      <!-- Voting Section: Wide Dark Gray Horizontal Panels Stacked Under Each Other -->
+                      <div class="space-y-3.5 w-full pt-1">
+                        ${optionsHtml}
+                      </div>
+                    </div>
+                  </div>
+                </main>
+
+                <!-- Footer Controls -->
+                <footer class="p-4 border-t border-slate-800/80 bg-slate-900/90 backdrop-blur-md sticky bottom-0 z-30">
+                  <div class="max-w-4xl mx-auto flex flex-wrap items-center justify-between gap-3">
+                    <div class="flex items-center gap-2">
+                      <button
+                        onclick="appAction('PREV_QUESTION')"
+                        ${session.currentQuestionIndex === 0 ? 'disabled' : ''}
+                        class="px-4 py-2.5 rounded-xl text-sm font-bold bg-slate-800 border border-slate-700 text-white hover:bg-slate-700 disabled:opacity-30 disabled:cursor-not-allowed transition cursor-pointer"
+                      >
+                        ← Předchozí
+                      </button>
+                      <button
+                        onclick="appAction('NEXT_QUESTION')"
+                        ${session.currentQuestionIndex === session.questions.length - 1 ? 'disabled' : ''}
+                        class="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-bold shadow-lg shadow-indigo-600/30 disabled:opacity-30 disabled:cursor-not-allowed transition cursor-pointer"
+                      >
+                        Další otázka →
+                      </button>
+                    </div>
+
+                    <div class="flex items-center gap-2">
+                      <button
+                        onclick="appAction('TOGGLE_RESULTS')"
+                        class="px-4 py-2.5 rounded-xl text-sm font-bold border transition cursor-pointer ${
+                          session.showResults ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' : 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-500'
+                        }"
+                      >
+                        ${session.showResults ? 'Skrýt výsledky' : 'Odhalit výsledky hned'}
+                      </button>
+
+                      <button
+                        onclick="appAction('RESTART_TIMER')"
+                        class="p-2.5 rounded-xl bg-slate-800 border border-slate-700 text-slate-300 hover:text-white transition cursor-pointer"
+                        title="Restartovat odpočet 30s"
+                      >
+                        🔄
+                      </button>
+                    </div>
+                  </div>
+                </footer>
+
+                ${renderEditorModalHtml()}
+                ${renderUrlSettingsModalHtml()}
+              </div>
+            `;
+          }
+
+          function renderUrlSettingsModalHtml() {
+            if (!showUrlSettings) return '';
+            return `
+              <div class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                <div class="bg-slate-900 border border-slate-800 rounded-3xl max-w-lg w-full p-6 shadow-2xl space-y-5">
+                  <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+                    <h3 class="text-lg font-bold text-white flex items-center gap-2">
+                      <span>🌐 Nastavení veřejné adresy pro QR kód</span>
+                    </h3>
+                    <button onclick="appAction('CLOSE_URL_SETTINGS')" class="p-1.5 rounded-xl hover:bg-slate-800 text-slate-400 hover:text-white cursor-pointer">
+                      ✕
+                    </button>
+                  </div>
+
+                  <form onsubmit="handleUrlSettingsForm(event)" class="space-y-4">
+                    <div>
+                      <label class="block text-xs font-bold text-slate-300 uppercase tracking-wider mb-2">
+                        Základní webová adresa (např. z GitHub Pages)
+                      </label>
+                      <input
+                        id="custom-url-input"
+                        type="text"
+                        value="${customBaseUrl || (window.location.protocol.startsWith('http') ? window.location.origin + window.location.pathname : 'https://jenprostatistiku.github.io/hlasovani/')}"
+                        placeholder="https://uzivatel.github.io/hlasovani/"
+                        class="w-full px-4 py-3 bg-slate-950 border border-slate-700 rounded-xl text-white font-mono text-sm outline-none focus:border-indigo-500"
+                      />
+                      <p class="text-xs text-slate-400 mt-2 leading-relaxed">
+                        Tato adresa se zakóduje do QR kódu na projektoru, aby ji mobily žáků ve třídě okamžitě otevřely v prohlížeči.
+                      </p>
+                    </div>
+
+                    <div class="bg-slate-950/80 border border-slate-800 rounded-xl p-3.5 text-xs text-slate-300 space-y-2">
+                      <div class="font-bold text-indigo-300">
+                        ℹ️ Jak nahrát a prezentovat z GitHub Pages zdarma:
+                      </div>
+                      <ol class="list-decimal list-inside space-y-1 text-slate-400 pl-1 leading-normal">
+                        <li>Nahrajte soubor <code class="text-indigo-300 font-mono">index.html</code> do vašeho GitHub repozitáře.</li>
+                        <li>V repozitáři přejděte do <strong>Settings → Pages</strong>.</li>
+                        <li>Vyberte Branch: <strong>main</strong> a klikněte na <strong>Save</strong>.</li>
+                        <li>Získáte adresu typu <code class="text-emerald-400 font-mono">https://uzivatel.github.io/repo/</code>.</li>
+                      </ol>
+                    </div>
+
+                    <div class="flex items-center justify-end gap-3 pt-2">
+                      <button
+                        type="button"
+                        onclick="appAction('CLOSE_URL_SETTINGS')"
+                        class="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-xl text-sm font-semibold cursor-pointer"
+                      >
+                        Zrušit
+                      </button>
+                      <button
+                        type="submit"
+                        class="px-5 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-bold shadow-lg shadow-indigo-600/30 cursor-pointer"
+                      >
+                        Uložit adresu pro QR kód
+                      </button>
+                    </div>
+                  </form>
+                </div>
+              </div>
+            `;
+          }
+
+          function renderEditorModalHtml() {
+            if (!showQuestionEditor) return '';
+            return `
+              <div class="fixed inset-0 bg-black/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                <div class="bg-slate-900 border border-slate-800 rounded-3xl max-w-2xl w-full max-h-[90vh] overflow-y-auto p-6 shadow-2xl space-y-6">
+                  <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+                    <h3 class="text-xl font-bold text-white flex items-center gap-2">
+                      <span>⚙️ Správa otázek</span>
+                    </h3>
+                    <button onclick="appAction('CLOSE_EDITOR')" class="p-1.5 rounded-xl hover:bg-slate-800 text-slate-400 hover:text-white cursor-pointer">
+                      ✕
+                    </button>
+                  </div>
+
+                  <div class="space-y-3">
+                    <h4 class="text-xs font-bold uppercase tracking-wider text-slate-400">
+                      Aktuální otázky (${session.questions.length})
+                    </h4>
+                    <div class="space-y-2 max-h-56 overflow-y-auto pr-1">
+                      ${session.questions.map((q, idx) => `
+                        <div class="bg-slate-950 border border-slate-800 rounded-xl p-3 flex items-start justify-between gap-3">
+                          <div class="flex-1 min-w-0">
+                            <span class="text-xs font-bold text-indigo-400 block">Otázka ${idx + 1} (${q.options.length} možností)</span>
+                            <p class="text-sm font-semibold text-slate-200 truncate">${q.text}</p>
+                          </div>
+                          <button onclick="appAction('DELETE_QUESTION', '${q.id}')" class="p-2 text-slate-500 hover:text-rose-400 rounded-lg hover:bg-slate-900 transition cursor-pointer">
+                            🗑️
+                          </button>
+                        </div>
+                      `).join('')}
+                    </div>
+                  </div>
+
+                  <form onsubmit="handleAddQuestionForm(event)" class="bg-slate-950/80 border border-slate-800/80 rounded-2xl p-4 space-y-3">
+                    <h4 class="text-xs font-bold uppercase tracking-wider text-emerald-400">
+                      + Přidat novou otázku
+                    </h4>
+
+                    <div>
+                      <label class="block text-xs text-slate-400 mb-1">Znění otázky</label>
+                      <input id="new-q-text" type="text" placeholder="Např. Co je hlavní město Francie?" class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-sm text-white outline-none focus:border-indigo-500" required />
+                    </div>
+
+                    <div>
+                      <label class="block text-xs text-slate-400 mb-1">URL obrázku (volitelné)</label>
+                      <input id="new-q-img" type="url" placeholder="https://images.unsplash.com/..." class="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-sm text-white outline-none focus:border-indigo-500" />
+                    </div>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                      <input id="new-q-opt1" type="text" placeholder="Možnost A (povinné)" class="px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-sm text-white outline-none focus:border-indigo-500" required />
+                      <input id="new-q-opt2" type="text" placeholder="Možnost B (povinné)" class="px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-sm text-white outline-none focus:border-indigo-500" required />
+                      <input id="new-q-opt3" type="text" placeholder="Možnost C (volitelné)" class="px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-sm text-white outline-none focus:border-indigo-500" />
+                      <input id="new-q-opt4" type="text" placeholder="Možnost D (volitelné)" class="px-3 py-2 bg-slate-900 border border-slate-700 rounded-xl text-sm text-white outline-none focus:border-indigo-500" />
+                    </div>
+
+                    <button type="submit" class="w-full py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white font-bold text-sm rounded-xl transition cursor-pointer">
+                      Vložit otázku do prezentace
+                    </button>
+                  </form>
+
+                  <div class="pt-2 flex justify-end">
+                    <button type="button" onclick="appAction('CLOSE_EDITOR')" class="px-5 py-2 bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-xl text-sm font-bold cursor-pointer">
+                      Hotovo
+                    </button>
+                  </div>
+                </div>
+              </div>
+            `;
+          }
+
+          // Initial Render
+          render();
+        }, 150);
+      })();
+    </script>
+  </body>
+</html>
