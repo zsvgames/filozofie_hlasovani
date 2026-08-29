@@ -1,0 +1,681 @@
+<!doctype html>
+<html lang="cs">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <title>Živé hlasování do třídy</title>
+    <meta name="description" content="Interaktivní hlasovací systém pro výuku a prezentaci na projektoru s QR kódem, PINem a živými výsledky." />
+    <meta property="og:title" content="Živé hlasování do třídy" />
+    <meta property="og:description" content="Interaktivní hlasovací systém pro výuku a prezentaci na projektoru s QR kódem, PINem a živými výsledky." />
+    <meta property="og:type" content="website" />
+    
+    <!-- Fonts & CDNs for Direct Offline/Standalone Open -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+    
+    <!-- Tailwind CSS CDN (for standalone direct open) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        darkMode: 'class',
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ['"Plus Jakarta Sans"', 'sans-serif'],
+              mono: ['"JetBrains Mono"', 'monospace'],
+            }
+          }
+        }
+      }
+    </script>
+
+    <!-- QRCode & Confetti CDNs -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.3/dist/confetti.browser.min.js"></script>
+    <!-- MQTT for real-time peer connection between phones and projector -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/paho-mqtt/1.0.1/mqttws31.min.js"></script>
+
+    <style>
+      body {
+        font-family: 'Plus Jakarta Sans', sans-serif;
+      }
+      @keyframes pulse-subtle {
+        0%, 100% { opacity: 1; transform: scale(1); }
+        50% { opacity: 0.85; transform: scale(0.99); }
+      }
+      .animate-pulse-subtle {
+        animation: pulse-subtle 3s ease-in-out infinite;
+      }
+    </style>
+  </head>
+  <body class="bg-slate-950 text-slate-100 antialiased selection:bg-indigo-500 selection:text-white min-h-screen">
+    <div id="root"></div>
+
+    <!-- Vite module entry point (when running via Vite dev server) -->
+    <script type="module">
+      import '/src/main.tsx';
+      window.__VITE_LOADED__ = true;
+    </script>
+
+    <!-- Standalone Fallback Script: Runs directly if index.html is downloaded and opened via file:// or plain static server -->
+    <script>
+      setTimeout(function() {
+        if (window.__VITE_LOADED__) return; // Vite already mounted the app
+
+        // Standalone Single-File Engine
+        const DEFAULT_QUESTIONS = [
+          {
+            id: 'q1',
+            text: 'Jak by měla nosit kočka kalhoty?',
+            image: 'https://images.unsplash.com/photo-1514888286974-6c03e2ca1dba?w=800&auto=format&fit=crop&q=80',
+            options: ['Na 2 zadních nohách (jako člověk)', 'Na všech 4 nohách (přes celé tělo)'],
+            timeLimit: 0
+          },
+          {
+            id: 'q2',
+            text: 'Kdybys mohl znát přesný den a hodinu své smrti, chtěl bys to vědět?',
+            image: 'https://images.unsplash.com/photo-1501139083538-0139583c060f?w=800&auto=format&fit=crop&q=80',
+            options: ['Ano, chtěl(a) bych to vědět', 'Ne, raději žít v nevědomosti'],
+            timeLimit: 0
+          },
+          {
+            id: 'q3',
+            text: 'Co je v životě důležitější – být velmi chytrý, nebo velmi šťastný?',
+            image: 'https://images.unsplash.com/photo-1507525428034-b723cf961d3e?w=800&auto=format&fit=crop&q=80',
+            options: ['Být velmi chytrý (úspěch a vědění)', 'Být velmi šťastný (vnitřní klid a radost)'],
+            timeLimit: 0
+          },
+          {
+            id: 'q4',
+            text: 'Měl by se v moderní společnosti znovu zavést trest smrti za nejtěžší zločiny?',
+            image: 'https://images.unsplash.com/photo-1589829545856-d10d557cf95f?w=800&auto=format&fit=crop&q=80',
+            options: ['Ano, pro neoddiskutovatelně prokázané brutální činy', 'Ne, trest smrti do demokratického právního státu nepatří'],
+            timeLimit: 0
+          },
+          {
+            id: 'q5',
+            text: 'Měla by umělá inteligence (AI) plně nahradit známkování a testování ve školách?',
+            image: 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&auto=format&fit=crop&q=80',
+            options: ['Ano, AI je objektivnější a rychlejší', 'Ne, lidský pedagog a empatie jsou nenahraditelné'],
+            timeLimit: 0
+          }
+        ];
+
+        // State Store
+        const urlParams = new URLSearchParams(window.location.search);
+        let role = urlParams.get('role') || 'projector'; // 'projector' | 'voter' | 'remote' | 'editor'
+        let roomCode = (urlParams.get('room') || 'TRIDA').toUpperCase();
+        let voterId = localStorage.getItem('voting_voter_id') || ('v_' + Math.random().toString(36).substring(2, 9));
+        localStorage.setItem('voting_voter_id', voterId);
+        let voterName = localStorage.getItem('voting_voter_name') || '';
+        let hasVoterJoined = !!voterName;
+
+        let session = {
+          roomCode: roomCode,
+          currentQuestionIndex: 0,
+          isVotingOpen: true,
+          showResults: false,
+          isLobby: true,
+          questions: JSON.parse(localStorage.getItem('voting_questions_' + roomCode) || JSON.stringify(DEFAULT_QUESTIONS)),
+          participants: [],
+          votes: {}
+        };
+
+        // Realtime Sync via BroadcastChannel (local tabs) + Public MQTT Broker (multi-device)
+        const bc = new BroadcastChannel('voting_room_' + roomCode);
+        bc.onmessage = (e) => {
+          if (e.data && e.data.type === 'SYNC_STATE') {
+            session = e.data.session;
+            render();
+          } else if (e.data && e.data.type === 'VOTE_ACTION') {
+            handleVoteAction(e.data);
+          }
+        };
+
+        let mqttClient = null;
+        try {
+          if (typeof Paho !== 'undefined') {
+            const clientId = 'client_' + Math.random().toString(36).substring(2, 10);
+            mqttClient = new Paho.MQTT.Client('broker.emqx.io', 8084, clientId);
+            mqttClient.onMessageArrived = (msg) => {
+              try {
+                const data = JSON.parse(msg.payloadString);
+                if (data.type === 'SYNC_STATE' && role !== 'projector') {
+                  session = data.session;
+                  render();
+                } else if (data.type === 'VOTE_ACTION' && role === 'projector') {
+                  handleVoteAction(data);
+                }
+              } catch (err) {}
+            };
+            mqttClient.connect({
+              useSSL: true,
+              timeout: 4,
+              onSuccess: () => {
+                mqttClient.subscribe('hlasovani/' + roomCode + '/#');
+                if (role === 'projector') broadcastState();
+              },
+              onFailure: () => {}
+            });
+          }
+        } catch (e) {}
+
+        function broadcastState() {
+          localStorage.setItem('voting_questions_' + roomCode, JSON.stringify(session.questions));
+          bc.postMessage({ type: 'SYNC_STATE', session });
+          if (mqttClient && mqttClient.isConnected()) {
+            const message = new Paho.MQTT.Message(JSON.stringify({ type: 'SYNC_STATE', session }));
+            message.destinationName = 'hlasovani/' + roomCode + '/state';
+            mqttClient.send(message);
+          }
+        }
+
+        function sendVote(optionIndex) {
+          const action = {
+            type: 'VOTE_ACTION',
+            action: 'VOTE',
+            voterId: voterId,
+            voterName: voterName || 'Žák',
+            questionId: session.questions[session.currentQuestionIndex]?.id,
+            optionIndex: optionIndex
+          };
+          bc.postMessage(action);
+          if (mqttClient && mqttClient.isConnected()) {
+            const msg = new Paho.MQTT.Message(JSON.stringify(action));
+            msg.destinationName = 'hlasovani/' + roomCode + '/vote';
+            mqttClient.send(msg);
+          }
+          handleVoteAction(action);
+        }
+
+        function sendJoin(name) {
+          voterName = name;
+          hasVoterJoined = true;
+          localStorage.setItem('voting_voter_name', name);
+          const action = {
+            type: 'VOTE_ACTION',
+            action: 'JOIN',
+            voterId: voterId,
+            voterName: name
+          };
+          bc.postMessage(action);
+          if (mqttClient && mqttClient.isConnected()) {
+            const msg = new Paho.MQTT.Message(JSON.stringify(action));
+            msg.destinationName = 'hlasovani/' + roomCode + '/vote';
+            mqttClient.send(msg);
+          }
+          handleVoteAction(action);
+        }
+
+        function handleVoteAction(data) {
+          if (data.action === 'JOIN') {
+            if (!session.participants.some(p => p.id === data.voterId)) {
+              session.participants.push({ id: data.voterId, name: data.voterName });
+              if (role === 'projector') broadcastState();
+              render();
+            }
+          } else if (data.action === 'VOTE') {
+            if (!session.votes[data.questionId]) {
+              session.votes[data.questionId] = {};
+            }
+            session.votes[data.questionId][data.voterId] = data.optionIndex;
+            if (!session.participants.some(p => p.id === data.voterId)) {
+              session.participants.push({ id: data.voterId, name: data.voterName });
+            }
+            if (role === 'projector') broadcastState();
+            render();
+          }
+        }
+
+        // Action Handlers for Projector
+        window.projectorAction = function(actionType) {
+          if (actionType === 'START_POLL') {
+            session.isLobby = false;
+            session.currentQuestionIndex = 0;
+            session.isVotingOpen = true;
+            session.showResults = false;
+          } else if (actionType === 'NEXT_QUESTION') {
+            if (session.currentQuestionIndex < session.questions.length - 1) {
+              session.currentQuestionIndex++;
+              session.isVotingOpen = true;
+              session.showResults = false;
+            }
+          } else if (actionType === 'PREV_QUESTION') {
+            if (session.currentQuestionIndex > 0) {
+              session.currentQuestionIndex--;
+              session.isVotingOpen = true;
+              session.showResults = false;
+            }
+          } else if (actionType === 'TOGGLE_RESULTS') {
+            session.showResults = !session.showResults;
+            if (session.showResults && typeof confetti === 'function') {
+              confetti({ particleCount: 50, spread: 60, origin: { y: 0.8 } });
+            }
+          } else if (actionType === 'TOGGLE_VOTING') {
+            session.isVotingOpen = !session.isVotingOpen;
+          } else if (actionType === 'GO_LOBBY') {
+            session.isLobby = true;
+          } else if (actionType === 'RESET_ALL') {
+            session.votes = {};
+            session.isLobby = true;
+            session.currentQuestionIndex = 0;
+            session.isVotingOpen = true;
+            session.showResults = false;
+          }
+          broadcastState();
+          render();
+        };
+
+        window.setRole = function(newRole) {
+          role = newRole;
+          render();
+        };
+
+        window.handleJoinSubmit = function(e) {
+          e.preventDefault();
+          const input = document.getElementById('standalone-name-input');
+          const name = input ? input.value.trim() : '';
+          sendJoin(name || 'Žák');
+          render();
+        };
+
+        // Render UI
+        function render() {
+          const root = document.getElementById('root');
+          if (!root) return;
+
+          const currentQ = session.questions[session.currentQuestionIndex] || { text: '', options: [] };
+          const qVotes = session.votes[currentQ.id] || {};
+          const totalVotesForQ = Object.keys(qVotes).length;
+          const participantCount = session.participants.length;
+
+          // Compute option counts
+          const optionCounts = (currentQ.options || []).map((_, idx) => {
+            return Object.values(qVotes).filter(v => v === idx).length;
+          });
+
+          const currentBaseUrl = window.location.href.split('?')[0];
+          const votingUrl = currentBaseUrl + '?role=voter&room=' + encodeURIComponent(session.roomCode);
+
+          const optionColors = [
+            'bg-rose-500 border-rose-400 text-white',
+            'bg-blue-600 border-blue-400 text-white',
+            'bg-amber-500 border-amber-400 text-white',
+            'bg-emerald-600 border-emerald-400 text-white'
+          ];
+          const optionLetters = ['A', 'B', 'C', 'D'];
+
+          // -------------------------------------------------------------
+          // 1. VOTER INTERFACE (Mobile)
+          // -------------------------------------------------------------
+          if (role === 'voter') {
+            if (!hasVoterJoined) {
+              root.innerHTML = `
+                <div class="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-between max-w-md mx-auto p-5 sm:p-6 select-none font-sans">
+                  <header class="text-center pt-8">
+                    <div class="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-slate-900 border border-slate-800 text-xs font-semibold text-indigo-400 mb-3">
+                      <span class="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+                      Místnost: <strong>${session.roomCode}</strong>
+                    </div>
+                    <h1 class="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+                      Připojení k hlasování
+                    </h1>
+                    <p class="text-xs sm:text-sm text-slate-400 mt-1.5 max-w-xs mx-auto">
+                      Zadej své jméno pro vstup do hlasování.
+                    </p>
+                  </header>
+
+                  <main class="my-auto py-6">
+                    <form onsubmit="handleJoinSubmit(event)" class="bg-slate-900/90 border border-slate-800 rounded-3xl p-6 shadow-2xl space-y-6">
+                      <div>
+                        <label class="block text-xs font-bold text-slate-300 mb-2 uppercase tracking-wider">
+                          Jméno
+                        </label>
+                        <input
+                          id="standalone-name-input"
+                          type="text"
+                          value="${voterName}"
+                          placeholder="Jméno"
+                          autofocus
+                          maxlength="30"
+                          class="w-full px-4 py-3.5 bg-slate-950/90 border-2 border-slate-700 focus:border-indigo-500 focus:ring-4 focus:ring-indigo-500/20 rounded-2xl text-white font-bold text-base outline-none transition-all placeholder:text-slate-500"
+                        />
+                      </div>
+
+                      <div class="w-full pt-1">
+                        <button
+                          type="submit"
+                          class="w-full py-4 px-6 bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 hover:from-indigo-500 hover:via-purple-500 hover:to-pink-500 active:scale-[0.98] text-white font-bold text-base rounded-2xl shadow-lg shadow-indigo-600/30 transition-all duration-200 cursor-pointer flex items-center justify-center"
+                        >
+                          <span>Vstoupit do hlasování</span>
+                        </button>
+                      </div>
+                    </form>
+                  </main>
+
+                  <footer class="text-center pb-6 text-xs text-slate-500">
+                    <button onclick="setRole('projector')" class="text-slate-400 underline hover:text-white">Přepnout na projektor</button>
+                  </footer>
+                </div>
+              `;
+              return;
+            }
+
+            // Voter has joined:
+            const myCurrentVote = qVotes[voterId];
+            const hasVoted = myCurrentVote !== undefined;
+
+            if (session.isLobby) {
+              root.innerHTML = `
+                <div class="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-between max-w-md mx-auto p-5 select-none text-center">
+                  <header class="pt-6">
+                    <span class="text-xs px-3 py-1 rounded-full bg-slate-900 border border-slate-800 text-indigo-400 font-mono">
+                      PIN: ${session.roomCode}
+                    </span>
+                    <h2 class="text-xl font-bold text-white mt-3">Ahoj, ${voterName}!</h2>
+                  </header>
+                  <main class="my-auto py-12">
+                    <div class="w-16 h-16 rounded-full bg-indigo-600/20 border-2 border-indigo-500 flex items-center justify-center mx-auto mb-4 animate-pulse">
+                      <span class="text-2xl">⏳</span>
+                    </div>
+                    <h3 class="text-lg font-bold text-white mb-2">Čekáme na spuštění otázky</h3>
+                    <p class="text-sm text-slate-400 max-w-xs mx-auto">Učitel brzy odstartuje hlasování na projektoru.</p>
+                  </main>
+                  <footer class="pb-6">
+                    <button onclick="setRole('projector')" class="text-xs text-slate-500 underline">Režim projektoru</button>
+                  </footer>
+                </div>
+              `;
+              return;
+            }
+
+            // Active Question for Voter
+            let optionsHtml = '';
+            (currentQ.options || []).forEach((opt, idx) => {
+              const isSelected = myCurrentVote === idx;
+              const colorClass = isSelected ? 'bg-indigo-600 border-indigo-400 text-white ring-4 ring-indigo-500/30' : 'bg-slate-900 border-slate-800 text-slate-200 hover:border-slate-700 active:scale-98';
+              optionsHtml += `
+                <button
+                  onclick="sendVote(${idx}); render();"
+                  ${!session.isVotingOpen ? 'disabled' : ''}
+                  class="w-full p-4 rounded-2xl border-2 text-left font-bold text-base transition-all flex items-center gap-3 cursor-pointer ${colorClass} ${!session.isVotingOpen ? 'opacity-50 cursor-not-allowed' : ''}"
+                >
+                  <span class="w-8 h-8 rounded-xl bg-slate-800 border border-slate-700 flex items-center justify-center font-mono text-sm font-black flex-shrink-0 ${isSelected ? 'bg-white text-slate-950' : 'text-slate-300'}">
+                    ${optionLetters[idx] || (idx + 1)}
+                  </span>
+                  <span class="flex-1">${opt}</span>
+                  ${isSelected ? '<span class="text-emerald-400 font-black">✓ Hlasováno</span>' : ''}
+                </button>
+              `;
+            });
+
+            root.innerHTML = `
+              <div class="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-between max-w-md mx-auto p-4 sm:p-5 select-none">
+                <header class="flex items-center justify-between pb-3 border-b border-slate-800/80">
+                  <div>
+                    <span class="text-xs font-mono text-indigo-400">PIN: ${session.roomCode}</span>
+                    <h2 class="text-sm font-bold text-slate-300">${voterName}</h2>
+                  </div>
+                  <span class="text-xs px-2.5 py-1 rounded-full ${session.isVotingOpen ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-rose-500/20 text-rose-300 border border-rose-500/30'}">
+                    ${session.isVotingOpen ? '● Hlasování běží' : '🔒 Uzamčeno'}
+                  </span>
+                </header>
+
+                <main class="my-auto py-4 space-y-4">
+                  <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-4">
+                    <span class="text-[11px] font-bold uppercase tracking-wider text-indigo-400 block mb-1">
+                      Otázka ${session.currentQuestionIndex + 1} z ${session.questions.length}
+                    </span>
+                    <h3 class="text-base sm:text-lg font-bold text-white leading-snug">
+                      ${currentQ.text}
+                    </h3>
+                    ${currentQ.image ? `
+                      <div class="mt-3 overflow-hidden rounded-xl border border-slate-800 bg-slate-950 flex items-center justify-center p-1">
+                        <img
+                          src="${currentQ.image}"
+                          alt="Obrázek"
+                          referrerpolicy="no-referrer"
+                          class="w-auto max-w-full max-h-40 object-contain rounded-lg"
+                          onerror="this.style.display='none'"
+                        />
+                      </div>
+                    ` : ''}
+                  </div>
+
+                  <div class="space-y-2.5">
+                    ${optionsHtml}
+                  </div>
+                </main>
+
+                <footer class="pt-2 text-center text-xs text-slate-500">
+                  ${hasVoted ? '<p class="text-emerald-400 font-semibold mb-2">Váš hlas byl zaznamenán. Můžete jej změnit dokud je hlasování otevřené.</p>' : ''}
+                  <button onclick="setRole('projector')" class="underline hover:text-white">Přepnout na projektor</button>
+                </footer>
+              </div>
+            `;
+            return;
+          }
+
+          // -------------------------------------------------------------
+          // 2. PROJECTOR VIEW
+          // -------------------------------------------------------------
+          if (session.isLobby) {
+            root.innerHTML = `
+              <div class="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-between select-none">
+                <!-- Top Header Bar -->
+                <header class="p-4 sm:p-6 flex items-center justify-between border-b border-slate-800/80 max-w-6xl w-full mx-auto">
+                  <div class="flex items-center gap-3">
+                    <div class="px-3.5 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-sm font-bold font-mono text-indigo-400">
+                      PIN: <span class="text-white">${session.roomCode}</span>
+                    </div>
+                    <div class="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-slate-900 border border-slate-800 text-xs font-semibold text-slate-300">
+                      <span class="w-2 h-2 rounded-full bg-emerald-400 animate-ping"></span>
+                      Připojeno: <strong class="text-emerald-400 font-mono">${participantCount}</strong>
+                    </div>
+                  </div>
+
+                  <div class="flex items-center gap-2">
+                    <button onclick="setRole('voter')" class="px-3 py-1.5 bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 rounded-xl text-xs font-bold transition">
+                      📱 Hlasovat jako žák
+                    </button>
+                    <button onclick="document.documentElement.requestFullscreen ? document.documentElement.requestFullscreen() : null" class="p-2 bg-slate-900 border border-slate-800 text-slate-400 hover:text-white rounded-xl text-xs">
+                      ⛶
+                    </button>
+                  </div>
+                </header>
+
+                <!-- Center Lobby QR Hero -->
+                <main class="flex-1 flex flex-col justify-center items-center max-w-2xl w-full mx-auto p-6 sm:p-10">
+                  <div class="flex flex-col items-center text-center space-y-8 w-full max-w-sm">
+                    <!-- Clean Big QR Card -->
+                    <div class="relative">
+                      <div class="absolute -inset-2 bg-gradient-to-b from-indigo-500/25 to-purple-500/25 rounded-[40px] blur-xl opacity-70"></div>
+                      <div id="standalone-qrcode-box" class="relative p-6 sm:p-8 bg-white rounded-3xl sm:rounded-[36px] shadow-[0_20px_50px_rgba(0,0,0,0.4)] border-4 border-indigo-500/20 flex items-center justify-center">
+                      </div>
+                    </div>
+
+                    <!-- Single Start Poll Button -->
+                    <div class="w-full">
+                      <button
+                        onclick="projectorAction('START_POLL')"
+                        class="w-full py-4 sm:py-5 px-8 bg-gradient-to-r from-indigo-600 via-purple-600 to-pink-600 hover:from-indigo-500 hover:via-purple-500 hover:to-pink-500 active:scale-[0.98] text-white font-bold text-lg sm:text-xl rounded-2xl shadow-lg shadow-indigo-600/30 transition-all duration-200 cursor-pointer flex items-center justify-center"
+                      >
+                        <span>Spustit hlasování</span>
+                      </button>
+                    </div>
+                  </div>
+                </main>
+
+                <!-- Subtle bottom info -->
+                <footer class="p-4 text-center text-xs text-slate-500">
+                  <span>Naskenujte QR kód fotoaparátem v mobilu pro připojení</span>
+                </footer>
+              </div>
+            `;
+
+            // Render QR Code via QRCode.js
+            setTimeout(function() {
+              const qrContainer = document.getElementById('standalone-qrcode-box');
+              if (qrContainer && typeof QRCode !== 'undefined') {
+                qrContainer.innerHTML = '';
+                new QRCode(qrContainer, {
+                  text: votingUrl,
+                  width: 250,
+                  height: 250,
+                  colorDark: '#0f172a',
+                  colorLight: '#ffffff',
+                  correctLevel: QRCode.CorrectLevel.H
+                });
+              }
+            }, 50);
+            return;
+          }
+
+          // Active Projector Question Screen
+          let resultsHtml = '';
+          (currentQ.options || []).forEach((opt, idx) => {
+            const count = optionCounts[idx] || 0;
+            const pct = totalVotesForQ > 0 ? Math.round((count / totalVotesForQ) * 100) : 0;
+            const color = optionColors[idx % optionColors.length];
+
+            resultsHtml += `
+              <div class="bg-slate-900/90 border border-slate-800 rounded-2xl p-5 shadow-lg relative overflow-hidden">
+                <!-- Percentage Fill Bar (shown if showResults is on) -->
+                ${session.showResults ? `
+                  <div
+                    class="absolute inset-y-0 left-0 bg-indigo-600/20 border-r-2 border-indigo-500/40 transition-all duration-700"
+                    style="width: ${pct}%"
+                  ></div>
+                ` : ''}
+
+                <div class="relative z-10 flex items-center justify-between gap-4">
+                  <div class="flex items-center gap-3.5 flex-1 min-w-0">
+                    <span class="w-10 h-10 rounded-xl ${color} flex items-center justify-center font-mono font-black text-lg shadow-md flex-shrink-0">
+                      ${optionLetters[idx] || (idx + 1)}
+                    </span>
+                    <span class="text-base sm:text-lg font-bold text-slate-100 truncate">${opt}</span>
+                  </div>
+
+                  ${session.showResults ? `
+                    <div class="text-right flex-shrink-0">
+                      <span class="text-2xl font-black text-white font-mono">${pct}%</span>
+                      <span class="block text-xs font-semibold text-slate-400">${count} hlasů</span>
+                    </div>
+                  ` : `
+                    <span class="w-3 h-3 rounded-full bg-slate-700"></span>
+                  `}
+                </div>
+              </div>
+            `;
+          });
+
+          root.innerHTML = `
+            <div class="min-h-screen bg-slate-950 text-slate-100 flex flex-col justify-between select-none">
+              <!-- Top Question Header -->
+              <header class="p-4 sm:p-6 flex items-center justify-between border-b border-slate-800/80 max-w-6xl w-full mx-auto">
+                <div class="flex items-center gap-3">
+                  <span class="px-3 py-1 rounded-xl bg-indigo-600/20 border border-indigo-500/30 text-indigo-400 text-xs font-black uppercase">
+                    Otázka ${session.currentQuestionIndex + 1} / ${session.questions.length}
+                  </span>
+                  <div class="flex items-center gap-2 text-xs font-semibold text-slate-300">
+                    <span>Hlasovalo: <strong class="text-indigo-400 font-mono text-sm">${totalVotesForQ}</strong></span>
+                    <span class="text-slate-600">/</span>
+                    <span>Online: <strong class="text-emerald-400 font-mono text-sm">${participantCount}</strong></span>
+                  </div>
+                </div>
+
+                <div class="flex items-center gap-2">
+                  <button onclick="projectorAction('GO_LOBBY')" class="px-3 py-1.5 bg-slate-900 border border-slate-800 text-slate-300 rounded-xl text-xs font-bold hover:bg-slate-800 transition">
+                    Úvodní QR
+                  </button>
+                  <button onclick="setRole('voter')" class="px-3 py-1.5 bg-slate-900 border border-slate-800 text-indigo-400 rounded-xl text-xs font-bold hover:bg-slate-800 transition">
+                    📱 Hlasovat
+                  </button>
+                </div>
+              </header>
+
+              <!-- Main Question & Options -->
+              <main class="flex-1 max-w-5xl w-full mx-auto p-4 sm:p-8 flex flex-col justify-center">
+                <div class="mb-6 text-center">
+                  <h1 class="text-2xl sm:text-4xl font-extrabold text-white tracking-tight leading-tight mb-4">
+                    ${currentQ.text}
+                  </h1>
+
+                  ${currentQ.image ? `
+                    <div class="flex justify-center my-4">
+                      <div class="max-w-md w-full max-h-64 sm:max-h-72 overflow-hidden rounded-2xl border border-slate-800 shadow-xl bg-slate-950 flex items-center justify-center p-1">
+                        <img
+                          src="${currentQ.image}"
+                          alt="Obrázek k otázce"
+                          referrerpolicy="no-referrer"
+                          class="w-auto max-w-full max-h-60 sm:max-h-68 object-contain rounded-xl"
+                          onerror="this.style.display='none'"
+                        />
+                      </div>
+                    </div>
+                  ` : ''}
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-4xl mx-auto w-full">
+                  ${resultsHtml}
+                </div>
+              </main>
+
+              <!-- Bottom Control Dock -->
+              <footer class="p-4 border-t border-slate-800/80 bg-slate-900/90 backdrop-blur-md sticky bottom-0 z-30">
+                <div class="max-w-4xl mx-auto flex flex-wrap items-center justify-between gap-3">
+                  <!-- Navigation -->
+                  <div class="flex items-center gap-2">
+                    <button
+                      onclick="projectorAction('PREV_QUESTION')"
+                      ${session.currentQuestionIndex === 0 ? 'disabled' : ''}
+                      class="px-4 py-2.5 rounded-xl text-sm font-bold bg-slate-800 border border-slate-700 text-white hover:bg-slate-700 disabled:opacity-30 disabled:cursor-not-allowed transition"
+                    >
+                      ← Předchozí
+                    </button>
+                    <button
+                      onclick="projectorAction('NEXT_QUESTION')"
+                      ${session.currentQuestionIndex === session.questions.length - 1 ? 'disabled' : ''}
+                      class="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-sm font-bold shadow-lg shadow-indigo-600/30 disabled:opacity-30 disabled:cursor-not-allowed transition"
+                    >
+                      Další otázka →
+                    </button>
+                  </div>
+
+                  <!-- Results & Lock Actions -->
+                  <div class="flex items-center gap-2">
+                    <button
+                      onclick="projectorAction('TOGGLE_RESULTS')"
+                      class="px-4 py-2.5 rounded-xl text-sm font-bold border transition ${session.showResults ? 'bg-amber-500/20 text-amber-300 border-amber-500/40' : 'bg-emerald-600 hover:bg-emerald-500 text-white border-emerald-500'}"
+                    >
+                      ${session.showResults ? '🙈 Skrýt výsledky' : '👁️ Odhalit výsledky'}
+                    </button>
+                    <button
+                      onclick="projectorAction('TOGGLE_VOTING')"
+                      class="px-3.5 py-2.5 rounded-xl text-sm font-bold border transition ${session.isVotingOpen ? 'bg-slate-800 border-slate-700 text-slate-300' : 'bg-rose-600 text-white border-rose-500'}"
+                    >
+                      ${session.isVotingOpen ? '🔒 Zamknout' : '🔓 Odemknout'}
+                    </button>
+                    <button
+                      onclick="if(confirm('Opravdu chcete restartovat hlasování?')) projectorAction('RESET_ALL')"
+                      class="p-2.5 rounded-xl bg-slate-800 border border-slate-700 text-slate-400 hover:text-rose-400 transition"
+                      title="Restartovat celou prezentaci"
+                    >
+                      🔄
+                    </button>
+                  </div>
+                </div>
+              </footer>
+            </div>
+          `;
+        }
+
+        // Initial Standalone Boot
+        render();
+      }, 300);
+    </script>
+  </body>
+</html>
+
+
